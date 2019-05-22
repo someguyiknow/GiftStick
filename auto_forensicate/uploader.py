@@ -28,8 +28,9 @@ try:
   from urlparse import urlparse
 except ImportError:
   from urllib.parse import urlparse
-import boto
 from auto_forensicate import errors
+from google.cloud import storage
+from google.oauth2 import service_account
 
 
 class GCSUploader(object):
@@ -47,10 +48,14 @@ class GCSUploader(object):
       stamp (namedtuple): an optional ForensicsStamp containing
         the upload metadata.
     """
-    self._boto_configured = False
     self._bucket_name = None
     self._client_id = client_id
-    self._gs_keyfile = os.path.abspath(gs_keyfile)
+    if gs_keyfile:
+      self._gs_keyfile = os.path.abspath(gs_keyfile)
+      creds = service_account.Credentials.from_service_account_file(self._gs_keyfile)
+      self._gs_client = storage.Client(credentials=creds)
+    else:
+      self._gs_client = storage.Client.create_anonymous_client()
     self._gs_url = gs_url
     self._stamp_manager = stamp_manager
     self._logger = logging.getLogger(self.__class__.__name__)
@@ -67,19 +72,6 @@ class GCSUploader(object):
     self._UploadStream(stream, remote_path)
     self._stamp_uploaded = True
     self._logger.info('Uploaded %s', remote_path)
-
-  def _InitBoto(self):
-    """Initializes the boto library with credentials from self._gs_keyfile."""
-
-    if not boto.config.has_section('Credentials'):
-      boto.config.add_section('Credentials')
-
-    boto.config.set(
-        'Credentials', 'gs_service_key_file', self._gs_keyfile)
-    boto.config.set(
-        'Credentials', 'gs_service_client_id', self._client_id)
-
-    self._boto_configured = True
 
   def _SplitGCSUrl(self):
     """Extracts the bucket name and remote base path from the gs_url argument.
@@ -108,6 +100,7 @@ class GCSUploader(object):
 
     Args:
       destination (str): the destination path for the artifact.
+
     Returns:
       str: the sanitized remote path.
     """
@@ -136,16 +129,11 @@ class GCSUploader(object):
       remote_path (str): the remote path to store the data to.
       update_callback (func): an optional function called as upload progresses.
     """
-    if not self._boto_configured:
-      self._InitBoto()
+    file_name = ('/').join(remote_path.split('/')[1:])
 
-    try:
-      dst_uri = boto.storage_uri(remote_path, u'gs')
-      dst_uri.new_key().set_contents_from_stream(stream, cb=update_callback)
-    except boto.exception.GSDataError as e:
-      # This is usually raised when the connection is broken, and deserves to
-      # be retried.
-      raise errors.RetryableError(str(e))
+    bucket = self._gs_client.bucket(self._bucket_name)
+    blob = bucket.blob(file_name)
+    blob.upload_from_file(stream)
 
   def UploadArtifact(self, artifact, update_callback=None):
     """Uploads a file object to Google Cloud Storage.
