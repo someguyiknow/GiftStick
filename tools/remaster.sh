@@ -132,6 +132,7 @@ Optional flags
   --image=IMAGE         Set the output filename to IMAGE
   --remastered_iso=ISO  Path to the remastered ISO (used if --skip_iso is
                         enabled)
+  --no_bake_domain=URL  Domain to poll for creds, required if no_bake is set
   --skip_gcs            If set, will skip GCS environment setup
   --skip_image          If set, will skip the Gift image build
   --skip_iso            If set, will skip the ISO remastering"
@@ -257,6 +258,18 @@ function parse_arguments {
         die '--image requires a non-empty option argument.'
         ;;
 
+      --no_bake_domain)
+        assert_option_argument "$2" "--no_bake_domain"
+        FLAGS_NO_BAKE_DOMAIN="$2"
+        shift
+        ;;
+      --no_bake_domain=?*)
+        FLAGS_NO_BAKE_DOMAIN=${1#*=}
+        ;;
+      --no_bake_domain=)
+        die '--no_bake_domain requires a non-empty option argument.'
+        ;;
+
       --project)
         assert_option_argument "$2" "--project"
         FLAGS_CLOUD_PROJECT_NAME="$2"
@@ -334,9 +347,12 @@ function parse_arguments {
   done
 
   # Verify arguments and set defaults.
-  assert_project_flag
-  assert_bucket_name
-  assert_sa_name
+  if [[ ! "${FLAGS_NO_BAKE_DOMAIN}" ]] ; then
+    assert_project_flag
+    assert_bucket_name
+    assert_sa_name
+  fi
+
   assert_sourceiso_flag
   assert_image_flag
   assert_image_size_flag
@@ -346,27 +362,28 @@ function parse_arguments {
     readonly FLAGS_REMASTERED_ISO=$(basename "${UBUNTU_ISO}.${REMASTERED_SUFFIX}")
   fi
 
-  readonly GCS_REMOTE_URL="gs://${FLAGS_GCS_BUCKET_NAME}/forensic_evidence/${FLAGS_EXTRA_GCS_PATH}"
+  if [[ ! "${FLAGS_NO_BAKE_DOMAIN}" ]] ; then
+    readonly GCS_REMOTE_URL="gs://${FLAGS_GCS_BUCKET_NAME}/forensic_evidence/${FLAGS_EXTRA_GCS_PATH}"
 
-  # This checks agains a valid GCS object URL, such as
-  # gs://bucket/path/to/file
-  # See https://cloud.google.com/storage/docs/naming
-  if [[ ! "${GCS_REMOTE_URL}" =~ ^gs://[a-zA-Z0-9_\.-]{3,63}(/[a-zA-Z0-9_\.\-]+)+/?$ ]] ; then
-    die "${GCS_REMOTE_URL} is not a valid GCS URL"
-  fi
-
-  if [[ -z "${FLAGS_SA_JSON_PATH}" ]] ; then
-    if [[ "${FLAGS_SKIP_GCS}" == "true" ]]; then
-      die "Please provide path to a valid service account credentials file with --sa_json_file"
+    # This checks agains a valid GCS object URL, such as
+    # gs://bucket/path/to/file
+    # See https://cloud.google.com/storage/docs/naming
+    if [[ ! "${GCS_REMOTE_URL}" =~ ^gs://[a-zA-Z0-9_\.-]{3,63}(/[a-zA-Z0-9_\.\-]+)+/?$ ]] ; then
+      die "${GCS_REMOTE_URL} is not a valid GCS URL"
     fi
-    readonly GCS_SA_KEY_NAME="${GCS_SA_NAME}_${FLAGS_CLOUD_PROJECT_NAME}_key.json"
-    readonly GCS_SA_KEY_PATH="${REMASTER_SCRIPTS_DIR}/${GCS_SA_KEY_NAME}"
-  else
-    assert_sa_json_path "${FLAGS_SA_JSON_PATH}"
-    readonly GCS_SA_KEY_PATH="$(readlink -m "${FLAGS_SA_JSON_PATH}")"
-    readonly GCS_SA_KEY_NAME="$(basename "${FLAGS_SA_JSON_PATH}")"
-  fi
 
+    if [[ -z "${FLAGS_SA_JSON_PATH}" ]] ; then
+      if [[ "${FLAGS_SKIP_GCS}" == "true" ]]; then
+      die "Please provide path to a valid service account credentials file with --sa_json_file"
+      fi
+      readonly GCS_SA_KEY_NAME="${GCS_SA_NAME}_${FLAGS_CLOUD_PROJECT_NAME}_key.json"
+      readonly GCS_SA_KEY_PATH="${REMASTER_SCRIPTS_DIR}/${GCS_SA_KEY_NAME}"
+    else
+      assert_sa_json_path "${FLAGS_SA_JSON_PATH}"
+      readonly GCS_SA_KEY_PATH="$(readlink -m "${FLAGS_SA_JSON_PATH}")"
+      readonly GCS_SA_KEY_NAME="$(basename "${FLAGS_SA_JSON_PATH}")"
+    fi
+  fi
 }
 
 # Builds the remaster LiveCD iso file.
@@ -792,15 +809,23 @@ EOGRUB
 
   pushd "${TMP_MNT_POINT}/upper/home/${GIFT_USERNAME}/"
 
-  sudo cp "${GCS_SA_KEY_PATH}" .
+  if [[ ! "${FLAGS_NO_BAKE_DOMAIN}" ]]; then
+    sudo cp "${GCS_SA_KEY_PATH}" .
+    sudo cp "${FORENSICATE_SCRIPT_PATH}" "${FORENSICATE_SCRIPT_NAME}"
 
-  sudo cp "${FORENSICATE_SCRIPT_PATH}" "${FORENSICATE_SCRIPT_NAME}"
-
-  cat <<EOFORENSICSH | sudo tee -a "${CONFIG_FILENAME}" > /dev/null
+    cat <<EOFORENSICSH | sudo tee -a "${CONFIG_FILENAME}" > /dev/null
 AUTO_FORENSIC_SCRIPT_NAME="${AUTO_FORENSIC_SCRIPT_NAME}"
 GCS_SA_KEY_FILE="/home/${GIFT_USERNAME}/${GCS_SA_KEY_NAME}"
 GCS_REMOTE_URL="${GCS_REMOTE_URL}"
 EOFORENSICSH
+  else
+    sudo cp "${NO_BAKE_SCRIPT_PATH}" "${FORENSICATE_SCRIPT_NAME}"
+
+    cat <<EOFORENSICSH | sudo tee -a "${CONFIG_FILENAME}" > /dev/null
+AUTO_FORENSIC_SCRIPT_NAME="${AUTO_FORENSIC_SCRIPT_NAME}"
+NO_BAKE_DOMAIN="${FLAGS_NO_BAKE_DOMAIN}"
+EOFORENSICSH
+  fi
 
   if $FLAGS_BUILD_TEST ; then
     cat <<EOFORENSICSHEXTRA | sudo tee -a "${CONFIG_FILENAME}" > /dev/null
@@ -821,9 +846,11 @@ EOFORENSICSHEXTRA
   sudo chown -R 999:999 "${TMP_MNT_POINT}/upper/home/${GIFT_USERNAME}"
 
   msg "Cleaning up"
-  if [[ "${FLAGS_SKIP_GCS}" == "false" ]]; then
-    if [[ ! -z "${FLAGS_SA_JSON_PATH}" ]] ; then
-      sudo rm "${GCS_SA_KEY_PATH}"
+  if [[ ! "${FLAGS_NO_BAKE_DOMAIN}" ]]; then
+    if [[ "${FLAGS_SKIP_GCS}" == "false" ]]; then
+        if [[ ! -z "${FLAGS_SA_JSON_PATH}" ]] ; then
+        sudo rm "${GCS_SA_KEY_PATH}"
+        fi
     fi
   fi
   sudo umount "${TMP_MNT_POINT}"
@@ -851,9 +878,11 @@ function main {
 
   show_banner
 
-  if [[ "${FLAGS_SKIP_GCS}" == "false" ]]; then
-    check_gcs
-    configure_gcs
+  if [[ ! "${FLAGS_NO_BAKE_DOMAIN}" ]]; then
+    if [[ "${FLAGS_SKIP_GCS}" == "false" ]]; then
+      check_gcs
+      configure_gcs
+    fi
   fi
 
   if [[ ${FLAGS_SKIP_ISO_REMASTER} == "false" ]]; then
