@@ -48,7 +48,7 @@ sudo pip install segno
 
 UUID="`wget -qO- ${NO_BAKE_DOMAIN}`"
 
-echo "${NO_BAKE_DOMAIN}/scantag/${UUID}"|segno
+segno "${NO_BAKE_DOMAIN}/scantag/${UUID}"
 
 GCS_REMOTE_URL="`wget -qO- ${NO_BAKE_DOMAIN}/path/${UUID}`"
 while [[ $? -ne 0 ]]; do
