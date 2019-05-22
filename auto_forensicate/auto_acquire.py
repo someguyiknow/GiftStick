@@ -226,24 +226,9 @@ class AutoForensicate(object):
 
     stamp_manager = manager.StampManager()
 
-    if options.destination.startswith('gs://'):
-      if not self._gcs_settings:
-        raise errors.BadConfigOption(
-            'Please provide a valid GCS json file. '
-            'See --gs_keyfile option'
-        )
-
-      client_id = self._gcs_settings.get('client_id', None)
-
-      if not client_id:
-        raise errors.BadConfigOption(
-            'The provided GCS json file lacks a "client_id" key.'
-        )
-
-      return uploader.GCSUploader(
-          options.destination, options.gs_keyfile, client_id, stamp_manager)
-
-    return None
+    client_id = None
+    return uploader.GCSUploader(
+        options.destination, options.gs_keyfile, client_id, stamp_manager)
 
   def ParseArguments(self, args):
     """Parses the arguments.
