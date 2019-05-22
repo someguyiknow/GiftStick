@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 
+import pysmdev
 from auto_forensicate import errors
 from auto_forensicate import hostinfo
 from auto_forensicate import macdisk
@@ -31,14 +32,10 @@ class DiskArtifact(base.BaseArtifact):
   """The DiskArtifact class.
 
   Attributes:
-    hashlog_filename (str): where dcfldd will store the hashes.
     name (str): the name of the artifact.
     remote_path (str): the path to the artifact in the remote storage.
     size (int): the size of the artifact, in bytes.
   """
-
-  _DD_BINARY = 'dcfldd'
-  _DD_OPTIONS = ['hash=md5,sha1', 'bs=2M', 'conv=noerror', 'hashwindow=128M']
 
   def __init__(self, path, size):
     """Initializes a DiskArtifact object.
@@ -56,30 +53,13 @@ class DiskArtifact(base.BaseArtifact):
     if not path.startswith('/dev'):
       raise ValueError(
           'Error with path {0:s}: should start with \'/dev\''.format(path))
-    self._ddprocess = None
+    self._stream = None
     self._path = path
     if size > 0:
       self._size = size
     else:
       raise ValueError('Disk size must be an integer > 0')
-    self.hashlog_filename = '{0:s}.hash'.format(self.name)
     self.remote_path = 'Disks/{0:s}.image'.format(self.name)
-
-  def _GenerateDDCommand(self):
-    """Builds the DD command to run on the disk.
-
-    Returns:
-      list: the argument list for the dd command
-    """
-    dd_binary = hostinfo.Which(self._DD_BINARY)
-    if not dd_binary:
-      raise errors.RecipeException(
-          'Could not find \'{0:s}\''.format(self._DD_BINARY))
-    command = [
-        dd_binary, 'if={0:s}'.format(self._path),
-        'hashlog={0:s}'.format(self.hashlog_filename)]
-    command.extend(self._DD_OPTIONS)
-    return command
 
   def _GetStream(self):
     """Get the file-like object to the data of the artifact.
@@ -90,14 +70,12 @@ class DiskArtifact(base.BaseArtifact):
     Raises:
       IOError: If this method is called more than once before CloseStream().
     """
-    if self._ddprocess is None:
-      command = self._GenerateDDCommand()
-      self._logger.info('Opening disk with command \'{0:s}\''.format(command))
-      self._ddprocess = subprocess.Popen(
-          command, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if self._stream is None:
+      self._stream = pysmdev.handle()
+      self._stream.open(self._path)
     else:
       raise IOError('Disk is already opened')
-    return self._ddprocess.stdout
+    return self._stream
 
   def CloseStream(self):
     """Closes the file-like object.
@@ -109,24 +87,10 @@ class DiskArtifact(base.BaseArtifact):
       subprocess.CalledProcessError: if the dd process returns with an error.
       IOError: if CloseStream() is called before GetStream().
     """
-    if not self._ddprocess:
+    if not self._stream:
       raise IOError('Illegal call to CloseStream() before GetStream()')
 
-    # If there is anything still to read from the subprocess then CloseStream
-    # has been called early, terminate the child process to avoid deadlock.
-    c = self._ddprocess.stdout.read(1)
-    if c != '':
-      # TODO log this
-      self._ddprocess.terminate()
-      raise subprocess.CalledProcessError(
-          0, self._DD_BINARY, 'CloseStream() called but stdout still had data')
-
-    self._ddprocess.wait()
-    code = self._ddprocess.returncode
-    error = self._ddprocess.stderr.read()
-    if code < 0:
-      raise subprocess.CalledProcessError(code, self._DD_BINARY, error)
-    return error
+    return self._stream.close()
 
   def GetDescription(self):
     """Get a human readable description about the device.
@@ -145,7 +109,6 @@ class MacDiskArtifact(DiskArtifact):
   """The MacDiskArtifact class.
 
   Attributes:
-    hashlog_filename (str): where dcfldd will store the hashes.
     name (str): the name of the artifact.
     remote_path (str): the path to the artifact in the remote storage.
     size (int): the size of the artifact, in bytes.
@@ -188,7 +151,6 @@ class LinuxDiskArtifact(DiskArtifact):
   """The DiskArtifact class.
 
   Attributes:
-    hashlog_filename (str): where dcfldd will store the hashes.
     name (str): the name of the artifact.
     remote_path (str): the path to the artifact in the remote storage.
     size (int): the size of the artifact, in bytes.
@@ -397,16 +359,8 @@ class DiskRecipe(base.BaseRecipe):
     artifacts.append(disk_list_artifact)
 
     for disk in disks_to_collect:
-
-      hashlog_artifact = base.FileArtifact(disk.hashlog_filename)
-      hashlog_artifact.remote_path = 'Disks/{0:s}'.format(
-          hashlog_artifact.name)
-
-      # It is necessary for the DiskArtifact to be appended before the
-      # hashlog, as the hashlog is generated when dcfldd completes.
       disk_info_artifact = self._GetDiskInfoArtifact(disk)
       if disk_info_artifact:
         artifacts.append(disk_info_artifact)
       artifacts.append(disk)
-      artifacts.append(hashlog_artifact)
     return artifacts
